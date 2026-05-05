@@ -1253,6 +1253,8 @@ final class MouseEventHandler {
         let columns = engine.columns(in: wsId)
         let gap = CGFloat(controller.workspaceManager.gaps)
         let runtime = requiredRuntime("MouseEventHandler.finalizeOrCancelCommittedGesture")
+        var targetWindowHandle: WindowHandle?
+        var targetWindowNode: NiriWindow?
         let endState = runtime.withNiriViewportState(for: wsId, source: .mouse) { endState in
             controller.niriLayoutHandler.syncAnimationRefreshRate(
                 for: monitor,
@@ -1267,7 +1269,30 @@ final class MouseEventHandler {
                 centerMode: engine.centerFocusedColumn,
                 alwaysCenterSingleColumn: engine.alwaysCenterSingleColumn
             )
+            if columns.indices.contains(endState.activeColumnIndex),
+               let activeWindow = columns[endState.activeColumnIndex].activeWindow {
+                endState.selectedNodeId = activeWindow.id
+                targetWindowNode = activeWindow
+                targetWindowHandle = controller.workspaceManager.handle(for: activeWindow.token)
+                engine.updateFocusTimestamp(for: activeWindow.id)
+            }
             return endState
+        }
+
+        if let targetWindowNode {
+            _ = runtime.commitWorkspaceSelection(
+                nodeId: targetWindowNode.id,
+                focusedToken: targetWindowNode.token,
+                in: wsId,
+                onMonitor: monitor.id,
+                source: .mouse
+            )
+            _ = runtime.beginManagedFocusRequest(
+                targetWindowNode.token,
+                in: wsId,
+                onMonitor: monitor.id,
+                source: .mouse
+            )
         }
 
         let startedAnimation = controller.niriLayoutHandler.startScrollAnimationIfNeeded(
@@ -1280,6 +1305,9 @@ final class MouseEventHandler {
                 reason: .interactiveGesture,
                 affectedWorkspaceIds: [wsId]
             )
+        }
+        if let targetWindowHandle {
+            controller.focusWindow(targetWindowHandle, source: .mouse)
         }
     }
 
