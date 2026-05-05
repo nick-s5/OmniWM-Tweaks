@@ -372,6 +372,30 @@ private func makeRecordingPanelFactory(
         #expect(panelStore.panels.count == 2)
     }
 
+    @Test @MainActor func rebuildBarsRecreatesSurvivingPanelsAfterDisplayTopologyChange() throws {
+        let monitor = makeLayoutPlanTestMonitor(displayId: 801)
+        let controller = makeLayoutPlanTestController(monitors: [monitor])
+        let manager = WorkspaceBarManager()
+        let panelStore = RecordingPanelStore()
+
+        manager.monitorProvider = { [monitor] }
+        manager.screenProvider = { _ in nil }
+        manager.panelFactory = makeRecordingPanelFactory(store: panelStore)
+
+        manager.setup(controller: controller, settings: controller.settings)
+        defer { manager.cleanup() }
+
+        let initialHostingView = try #require(manager.hostingViewIdentifierForTests(on: monitor.id))
+        #expect(manager.activeBarCountForTests() == 1)
+        #expect(panelStore.panels.count == 1)
+
+        manager.rebuildBars()
+
+        #expect(manager.activeBarCountForTests() == 1)
+        #expect(manager.hostingViewIdentifierForTests(on: monitor.id) != initialHostingView)
+        #expect(panelStore.panels.count == 2)
+    }
+
     @Test @MainActor func cleanupCancelsPendingReconfigureBeforeItCanRecreatePanels() async {
         let monitor = makeLayoutPlanTestMonitor(displayId: 82)
         let controller = makeLayoutPlanTestController(monitors: [monitor])

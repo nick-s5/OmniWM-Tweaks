@@ -71,6 +71,12 @@ private func makeMonitorForBarTests(hasNotch: Bool) -> Monitor {
         #expect(!HiddenBarController.canCollapseSafely(omniMinX: 200, separatorMinX: 100, layoutDirection: .rightToLeft))
         #expect(!HiddenBarController.canCollapseSafely(omniMinX: nil, separatorMinX: 100, layoutDirection: .leftToRight))
     }
+
+    @Test func collapsedStateRepairsOnlyWhenScreenChangeLeavesUnsafeOrdering() {
+        #expect(HiddenBarController.shouldRepairCollapsedStateAfterScreenChange(isCollapsed: true, canCollapseSafely: false))
+        #expect(!HiddenBarController.shouldRepairCollapsedStateAfterScreenChange(isCollapsed: true, canCollapseSafely: true))
+        #expect(!HiddenBarController.shouldRepairCollapsedStateAfterScreenChange(isCollapsed: false, canCollapseSafely: false))
+    }
 }
 
 @Suite struct StatusBarControllerHelperTests {
