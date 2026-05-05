@@ -815,6 +815,84 @@ private func prepareMouseResizeFixture(
         #expect(controller.niriLayoutHandler.scrollAnimationByDisplay[monitor.displayId] == workspaceId)
     }
 
+    @Test @MainActor func committedTrackpadGestureFinalizationCommitsSnappedColumnFocus() async {
+        let runtime = makeMouseEventTestRuntime()
+        let controller = runtime.controller
+        controller.settings.scrollGestureEnabled = true
+        controller.enableNiriLayout(
+            maxWindowsPerColumn: 1,
+            centerFocusedColumn: .always,
+            alwaysCenterSingleColumn: false
+        )
+        await controller.layoutRefreshController.waitForRefreshWorkForTests()
+        controller.syncMonitorsToNiriEngine()
+
+        guard let workspaceId = controller.activeWorkspace()?.id,
+              let monitor = controller.workspaceManager.monitor(for: workspaceId),
+              let engine = controller.niriEngine
+        else {
+            Issue.record("Missing Niri context for trackpad focus commit test")
+            return
+        }
+
+        let firstToken = controller.workspaceManager.addWindow(
+            makeMouseEventTestWindow(windowId: 621),
+            pid: getpid(),
+            windowId: 621,
+            to: workspaceId
+        )
+        let secondToken = controller.workspaceManager.addWindow(
+            makeMouseEventTestWindow(windowId: 622),
+            pid: getpid(),
+            windowId: 622,
+            to: workspaceId
+        )
+        guard let firstHandle = controller.workspaceManager.handle(for: firstToken),
+              let secondHandle = controller.workspaceManager.handle(for: secondToken)
+        else {
+            Issue.record("Missing handles for trackpad focus commit test")
+            return
+        }
+
+        _ = engine.syncWindows(
+            [firstHandle, secondHandle],
+            in: workspaceId,
+            selectedNodeId: nil,
+            focusedHandle: firstHandle
+        )
+        guard let firstNode = engine.findNode(for: firstHandle),
+              let secondNode = engine.findNode(for: secondHandle)
+        else {
+            Issue.record("Missing nodes for trackpad focus commit test")
+            return
+        }
+
+        controller.workspaceManager.withNiriViewportState(for: workspaceId) { state in
+            state.selectedNodeId = firstNode.id
+            state.activeColumnIndex = 0
+            state.viewOffsetPixels = .static(0)
+        }
+        controller.layoutRefreshController.requestImmediateRelayout(
+            reason: .workspaceTransition,
+            affectedWorkspaceIds: [workspaceId]
+        )
+        await controller.layoutRefreshController.waitForRefreshWorkForTests()
+
+        controller.workspaceManager.withNiriViewportState(for: workspaceId) { state in
+            state.viewOffsetPixels = .gesture(ViewGesture(currentViewOffset: 2_000, isTrackpad: true))
+        }
+
+        controller.mouseEventHandler.finalizeOrCancelCommittedGesture(
+            using: .init(workspaceId: workspaceId, monitorId: monitor.id),
+            engine: engine
+        )
+
+        let finalizedState = controller.workspaceManager.niriViewportState(for: workspaceId)
+        #expect(finalizedState.activeColumnIndex == 1)
+        #expect(finalizedState.selectedNodeId == secondNode.id)
+        #expect(controller.workspaceManager.pendingFocusedToken == secondToken)
+    }
+
     @Test @MainActor func scrollBurstOnlyMergesWithinMatchingModifierAndPhaseGroups() {
         let runtime = makeMouseEventTestRuntime()
         let controller = runtime.controller
