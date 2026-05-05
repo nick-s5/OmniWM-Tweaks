@@ -10,9 +10,9 @@ final class HiddenBarController {
     private weak var omniButton: NSStatusBarButton?
     private var separatorItem: NSStatusItem?
     private var collapseLength: CGFloat = HiddenBarController.boundedCollapseLength(screenWidth: nil)
-    private var hasAttemptedRuntimeRepairThisLaunch = false
     private var onUnsafeOrderingDetected: (() -> Void)?
     private var screenParametersObserver: NSObjectProtocol?
+    private var screenParametersRecoveryTask: Task<Void, Never>?
 
     private let separatorLength: CGFloat = 8
 
@@ -43,6 +43,13 @@ final class HiddenBarController {
         default:
             return omniMinX >= separatorMinX
         }
+    }
+
+    nonisolated static func shouldRepairCollapsedStateAfterScreenChange(
+        isCollapsed: Bool,
+        canCollapseSafely: Bool
+    ) -> Bool {
+        isCollapsed && !canCollapseSafely
     }
 
     func bind(omniButton: NSStatusBarButton, onUnsafeOrderingDetected: @escaping () -> Void) {
@@ -117,6 +124,8 @@ final class HiddenBarController {
     }
 
     func cleanup() {
+        screenParametersRecoveryTask?.cancel()
+        screenParametersRecoveryTask = nil
         if let observer = screenParametersObserver {
             NotificationCenter.default.removeObserver(observer)
             screenParametersObserver = nil
@@ -152,9 +161,34 @@ final class HiddenBarController {
     }
 
     private func requestRuntimeRepairIfNeeded() {
-        guard !hasAttemptedRuntimeRepairThisLaunch else { return }
-        hasAttemptedRuntimeRepairThisLaunch = true
         onUnsafeOrderingDetected?()
+    }
+
+    private func handleScreenParametersChanged() {
+        updateCollapseLength()
+        screenParametersRecoveryTask?.cancel()
+        screenParametersRecoveryTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: 500_000_000)
+            } catch {
+                return
+            }
+            self?.recoverCollapsedStateAfterScreenChange()
+        }
+    }
+
+    private func recoverCollapsedStateAfterScreenChange() {
+        updateCollapseLength()
+        guard Self.shouldRepairCollapsedStateAfterScreenChange(
+            isCollapsed: isCollapsed,
+            canCollapseSafely: canCollapseSafely()
+        ) else {
+            return
+        }
+
+        separatorItem?.length = separatorLength
+        settings.hiddenBarIsCollapsed = false
+        requestRuntimeRepairIfNeeded()
     }
 
     private func installScreenParametersObserverIfNeeded() {
@@ -165,7 +199,7 @@ final class HiddenBarController {
             queue: nil
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
-                self?.updateCollapseLength()
+                self?.handleScreenParametersChanged()
             }
         }
     }

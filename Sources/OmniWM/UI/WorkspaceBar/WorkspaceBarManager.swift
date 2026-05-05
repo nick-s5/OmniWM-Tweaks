@@ -173,6 +173,12 @@ final class WorkspaceBarManager {
         reconfigureBars(using: monitorProvider())
     }
 
+    func rebuildBars() {
+        guard controller != nil, settings != nil else { return }
+        removeAllBars()
+        reconfigureBars()
+    }
+
     func reconfigureBars(using monitors: [Monitor]) {
         guard let controller, let settings else { return }
 
@@ -514,7 +520,10 @@ final class WorkspaceBarManager {
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
-                self?.scheduleReconfigure(after: 150_000_000)
+                ScreenCoordinateSpace.invalidateDisplaySnapshot()
+                self?.scheduleDeferredUpdate(after: 500_000_000) { [weak self] in
+                    self?.rebuildBars()
+                }
             }
         }
     }
