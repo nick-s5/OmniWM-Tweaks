@@ -117,7 +117,44 @@ enum HiddenWindowPlacementResolver {
             monitor: monitor,
             monitors: monitors
         )
-        return alternateOverlap < primaryOverlap ? alternateOrigin : primaryOrigin
+        let bestLocalOrigin = alternateOverlap < primaryOverlap ? alternateOrigin : primaryOrigin
+        let bestLocalOverlap = min(primaryOverlap, alternateOverlap)
+        guard bestLocalOverlap > 0 else {
+            return bestLocalOrigin
+        }
+
+        let desktopMinX = monitors.map { $0.frame.minX }.min() ?? monitor.visibleFrame.minX
+        let desktopMaxX = monitors.map { $0.frame.maxX }.max() ?? monitor.visibleFrame.maxX
+
+        func desktopEdgeOrigin(for side: HideSide) -> CGPoint {
+            switch side {
+            case .left:
+                CGPoint(x: desktopMinX - size.width + reveal, y: targetY)
+            case .right:
+                CGPoint(x: desktopMaxX - reveal, y: targetY)
+            }
+        }
+
+        let requestedDesktopOrigin = desktopEdgeOrigin(for: requestedSide)
+        let requestedDesktopOverlap = overlapArea(
+            for: CGRect(origin: requestedDesktopOrigin, size: size),
+            monitor: monitor,
+            monitors: monitors
+        )
+
+        let alternateDesktopOrigin = desktopEdgeOrigin(for: alternateSide)
+        let alternateDesktopOverlap = overlapArea(
+            for: CGRect(origin: alternateDesktopOrigin, size: size),
+            monitor: monitor,
+            monitors: monitors
+        )
+
+        let bestDesktopOrigin = alternateDesktopOverlap < requestedDesktopOverlap
+            ? alternateDesktopOrigin
+            : requestedDesktopOrigin
+        let bestDesktopOverlap = min(requestedDesktopOverlap, alternateDesktopOverlap)
+
+        return bestDesktopOverlap < bestLocalOverlap ? bestDesktopOrigin : bestLocalOrigin
     }
 
     static func placement(

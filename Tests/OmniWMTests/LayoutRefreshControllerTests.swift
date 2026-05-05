@@ -1117,6 +1117,60 @@ private func layoutRefreshHasNiriScrollDirective(
         #expect(origin.x > fixture.secondaryMonitor.visibleFrame.maxX - 1.0)
     }
 
+    @Test @MainActor func workspaceInactiveHideUsesOuterDesktopEdgeWhenMonitorHasNeighborsOnBothSides() {
+        let left = makeLayoutPlanTestMonitor(
+            displayId: layoutPlanTestSyntheticDisplayId(1),
+            name: "Left",
+            x: 0
+        )
+        let middle = makeLayoutPlanTestMonitor(
+            displayId: layoutPlanTestSyntheticDisplayId(2),
+            name: "Middle",
+            x: 1920
+        )
+        let right = makeLayoutPlanTestMonitor(
+            displayId: layoutPlanTestSyntheticDisplayId(3),
+            name: "Right",
+            x: 3840
+        )
+        let controller = makeLayoutPlanTestController(
+            monitors: [left, middle, right],
+            workspaceConfigurations: [
+                WorkspaceConfiguration(
+                    name: "1",
+                    monitorAssignment: .specificDisplay(OutputId(from: left))
+                ),
+                WorkspaceConfiguration(
+                    name: "2",
+                    monitorAssignment: .specificDisplay(OutputId(from: middle))
+                ),
+                WorkspaceConfiguration(
+                    name: "3",
+                    monitorAssignment: .specificDisplay(OutputId(from: middle))
+                ),
+                WorkspaceConfiguration(
+                    name: "7",
+                    monitorAssignment: .specificDisplay(OutputId(from: right))
+                )
+            ]
+        )
+
+        let frame = CGRect(x: 2160, y: 180, width: 800, height: 600)
+        guard let origin = controller.layoutRefreshController.liveFrameHideOrigin(
+            for: frame,
+            monitor: middle,
+            side: .right,
+            pid: getpid(),
+            reason: .workspaceInactive
+        ) else {
+            Issue.record("Expected a live-frame hide origin for middle-monitor workspace hide")
+            return
+        }
+
+        #expect(origin.y == frame.origin.y)
+        #expect(origin.x > right.visibleFrame.maxX - 2.0)
+    }
+
     @Test @MainActor func liveFrameHideOriginUsesVerticalAxisForTransientHideOnVerticalOverride() {
         let fixture = makeTwoMonitorLayoutPlanTestController()
         let controller = fixture.controller
