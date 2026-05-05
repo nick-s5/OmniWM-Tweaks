@@ -45,6 +45,7 @@ final class QuakeTerminalController: NSObject, NSWindowDelegate, QuakeTerminalTa
     private let captureRestoreTarget: @MainActor () -> QuakeTerminalRestoreTarget?
     private let restoreFocusTarget: @MainActor (QuakeTerminalRestoreTarget) -> Void
     private let isWindowFocused: @MainActor (NSWindow) -> Bool
+    private let focusedWindowScreenProvider: @MainActor () -> NSScreen?
 
     private static var ghosttyInitialized = false
 
@@ -53,13 +54,15 @@ final class QuakeTerminalController: NSObject, NSWindowDelegate, QuakeTerminalTa
         motionPolicy: MotionPolicy,
         captureRestoreTarget: @escaping @MainActor () -> QuakeTerminalRestoreTarget? = { nil },
         restoreFocusTarget: @escaping @MainActor (QuakeTerminalRestoreTarget) -> Void = { _ in },
-        isWindowFocused: @escaping @MainActor (NSWindow) -> Bool = { $0.isKeyWindow }
+        isWindowFocused: @escaping @MainActor (NSWindow) -> Bool = { $0.isKeyWindow },
+        focusedWindowScreenProvider: @escaping @MainActor () -> NSScreen? = { nil }
     ) {
         self.settings = settings
         self.motionPolicy = motionPolicy
         self.captureRestoreTarget = captureRestoreTarget
         self.restoreFocusTarget = restoreFocusTarget
         self.isWindowFocused = isWindowFocused
+        self.focusedWindowScreenProvider = focusedWindowScreenProvider
         super.init()
     }
 
@@ -502,7 +505,12 @@ final class QuakeTerminalController: NSObject, NSWindowDelegate, QuakeTerminalTa
     }
 
     private func persistCustomFrame(_ frame: NSRect) {
-        settings.quakeTerminalCustomFrame = frame
+        guard let normalizedFrame = QuakeTerminalGeometryPolicy.normalizedCustomFrame(frame) else {
+            settings.resetQuakeTerminalCustomFrame()
+            return
+        }
+
+        settings.quakeTerminalCustomFrame = normalizedFrame
         settings.quakeTerminalUseCustomFrame = true
         UserDefaults.standard.synchronize()
     }
@@ -513,8 +521,10 @@ final class QuakeTerminalController: NSObject, NSWindowDelegate, QuakeTerminalTa
         let generation = beginAnimationTransition()
 
         if settings.quakeTerminalUseCustomFrame,
-           let customFrame = settings.quakeTerminalCustomFrame,
-           screen.visibleFrame.intersects(customFrame) {
+           let customFrame = QuakeTerminalGeometryPolicy.normalizedCustomFrame(
+               settings.quakeTerminalCustomFrame,
+               visibleFrame: screen.visibleFrame
+           ) {
             window.setFrame(customFrame, display: false)
             window.level = .popUpMenu
             window.makeKeyAndOrderFront(nil)
@@ -536,6 +546,8 @@ final class QuakeTerminalController: NSObject, NSWindowDelegate, QuakeTerminalTa
                 }
             })
             return
+        } else if settings.quakeTerminalUseCustomFrame {
+            settings.resetQuakeTerminalCustomFrame()
         }
 
         let position = settings.quakeTerminalPosition
@@ -741,6 +753,9 @@ final class QuakeTerminalController: NSObject, NSWindowDelegate, QuakeTerminalTa
             }
 
         case .focusedWindow:
+            if let screen = focusedWindowScreenProvider() {
+                return screen
+            }
             if let screen = screenOfFocusedWindow(monitors: monitors) {
                 return screen
             }

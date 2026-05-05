@@ -108,6 +108,9 @@ final class WMController {
         },
         restoreFocusTarget: { [weak self] target in
             self?.restoreQuakeTerminalFocus(to: target)
+        },
+        focusedWindowScreenProvider: { [weak self] in
+            self?.focusedManagedWindowScreen()
         }
     )
     @ObservationIgnored
@@ -136,7 +139,7 @@ final class WMController {
     @ObservationIgnored
     private(set) lazy var serviceLifecycleManager = ServiceLifecycleManager(controller: self)
     @ObservationIgnored
-    private(set) lazy var windowActionHandler = WindowActionHandler(controller: self)
+    private(set) lazy var windowActionHandler = WindowActionHandler(controller: self, platform: platform)
     @ObservationIgnored
     private(set) lazy var focusNotificationDispatcher = FocusNotificationDispatcher(controller: self)
     @ObservationIgnored
@@ -217,26 +220,30 @@ final class WMController {
         self.workspaceManager.onSessionStateChanged = { [weak self] in
             self?.handleSessionStateChanged()
         }
-        axManager.onFrameConfirmed = { [weak self] pid, windowId, frame, frameConfirmResult in
+        axManager.onFrameConfirmed = { [weak self] pid, windowId, frame, frameConfirmResult, requestId in
             guard let self else { return }
             let token = WindowToken(pid: pid, windowId: windowId)
+            guard let runtime = self.runtime else { return }
+            let originatingEpoch = runtime.observedFrameOriginEpoch(
+                for: token,
+                requestId: requestId,
+                source: .ax
+            )
+            let accepted = runtime.submit(
+                WMEffectConfirmation.observedFrame(
+                    token: token,
+                    frame: frame,
+                    source: .ax,
+                    originatingTransactionEpoch: originatingEpoch
+                )
+            )
+            guard accepted else { return }
             self.recordManagedRestoreGeometry(
                 for: token,
                 frame: frame,
                 reason: .frameConfirmed,
                 frameConfirmResult: frameConfirmResult
             )
-            if let runtime = self.runtime {
-                let originatingEpoch = runtime.frameWriteOutcomeOriginEpoch(source: .ax)
-                _ = runtime.submit(
-                    WMEffectConfirmation.observedFrame(
-                        token: token,
-                        frame: frame,
-                        source: .ax,
-                        originatingTransactionEpoch: originatingEpoch
-                    )
-                )
-            }
         }
         axManager.onFramePending = { [weak self] pid, windowId, frame, requestId in
             guard let self, let runtime = self.runtime else { return }
@@ -247,14 +254,13 @@ final class WMController {
                 for: token
             )
         }
-        axManager.onFrameFailed = { [weak self] pid, windowId, _, failureReason in
+        axManager.onFrameFailed = { [weak self] pid, windowId, _, failureReason, requestId in
             guard let self, let runtime = self.runtime else { return }
             let token = WindowToken(pid: pid, windowId: windowId)
-            let originatingEpoch = runtime.frameWriteOutcomeOriginEpoch(source: .ax)
             _ = runtime.submitAXFrameWriteOutcome(
                 for: token,
+                requestId: requestId,
                 axFailure: failureReason,
-                originatingTransactionEpoch: originatingEpoch,
                 source: .ax
             )
         }
@@ -429,7 +435,11 @@ final class WMController {
             && hasStartedServices
             && !serviceLifecycleManager.isSecureInputActive
         hotkeysEnabled = shouldEnableHotkeys
-        shouldEnableHotkeys ? hotkeys.start() : hotkeys.stop()
+        if shouldEnableHotkeys {
+            hotkeys.start()
+        } else {
+            hotkeys.stop()
+        }
     }
 
     func setGapSize(_ size: Double) {
@@ -1051,12 +1061,79 @@ final class WMController {
         pid: pid_t,
         fallbackWorkspaceId: WorkspaceDescriptor.ID?
     ) -> WorkspaceDescriptor.ID {
-        if let wsName = workspaceName,
-           let wsId = workspaceManager.workspaceId(for: wsName, createIfMissing: false)
-        {
-            return wsId
+        resolveWorkspacePlacement(
+            workspaceName: workspaceName,
+            axRef: axRef,
+            pid: pid,
+            existingEntry: nil,
+            fallbackWorkspaceId: fallbackWorkspaceId,
+            context: .automatic
+        )
+    }
+
+    private func resolveWorkspacePlacement(
+        workspaceName: String?,
+        axRef: AXWindowRef,
+        pid: pid_t?,
+        existingEntry: WindowModel.Entry?,
+        fallbackWorkspaceId: WorkspaceDescriptor.ID?,
+        context: WindowRuleReevaluationContext
+    ) -> WorkspaceDescriptor.ID {
+        if context == .automatic, let existingEntry {
+            return existingEntry.workspaceId
         }
 
+        if context == .automatic,
+           existingEntry == nil,
+           let pid,
+           let siblingWorkspaceId = workspaceForNewSiblingWindow(
+               pid: pid,
+               fallbackWorkspaceId: fallbackWorkspaceId
+           )
+        {
+            return siblingWorkspaceId
+        }
+
+        if let workspaceName,
+           let workspaceId = workspaceManager.workspaceId(for: workspaceName, createIfMissing: false)
+        {
+            return workspaceId
+        }
+
+        if let existingEntry {
+            return existingEntry.workspaceId
+        }
+
+        return defaultWorkspaceId(for: axRef, fallbackWorkspaceId: fallbackWorkspaceId)
+    }
+
+    private func workspaceForNewSiblingWindow(
+        pid: pid_t,
+        fallbackWorkspaceId: WorkspaceDescriptor.ID?
+    ) -> WorkspaceDescriptor.ID? {
+        let entries = workspaceManager.entries(forPid: pid)
+        guard !entries.isEmpty else { return nil }
+
+        if let focusedToken = workspaceManager.focusedToken,
+           let focusedEntry = entries.first(where: { $0.token == focusedToken })
+        {
+            return focusedEntry.workspaceId
+        }
+
+        if let fallbackWorkspaceId,
+           entries.contains(where: { $0.workspaceId == fallbackWorkspaceId })
+        {
+            return fallbackWorkspaceId
+        }
+
+        let workspaceIds = Set(entries.map(\.workspaceId))
+        return workspaceIds.count == 1 ? entries[0].workspaceId : nil
+    }
+
+    private func defaultWorkspaceId(
+        for axRef: AXWindowRef,
+        fallbackWorkspaceId: WorkspaceDescriptor.ID?
+    ) -> WorkspaceDescriptor.ID {
         if let monitor = monitorForInteraction(),
            let workspace = workspaceManager.activeWorkspaceOrFirst(on: monitor.id)
         {
@@ -1132,6 +1209,17 @@ final class WMController {
         AXWindowService.framePreferFast(entry.axRef)
             ?? axManager.lastAppliedFrame(for: entry.windowId)
             ?? (try? AXWindowService.frame(entry.axRef))
+    }
+
+    func focusedManagedWindowScreen() -> NSScreen? {
+        guard let token = workspaceManager.focusedToken,
+              let entry = workspaceManager.entry(for: token),
+              let frame = liveFrame(for: entry),
+              let monitor = frame.center.monitorApproximation(in: workspaceManager.monitors)
+        else {
+            return nil
+        }
+        return NSScreen.screens.first(where: { $0.displayId == monitor.displayId })
     }
 
     private func floatingPlacementMonitor(
@@ -1626,25 +1714,17 @@ final class WMController {
     func resolvedWorkspaceId(
         for evaluation: WindowDecisionEvaluation,
         axRef: AXWindowRef,
-        pid: pid_t,
         existingEntry: WindowModel.Entry?,
-        fallbackWorkspaceId: WorkspaceDescriptor.ID?
+        fallbackWorkspaceId: WorkspaceDescriptor.ID?,
+        context: WindowRuleReevaluationContext = .automatic
     ) -> WorkspaceDescriptor.ID {
-        if let workspaceName = evaluation.decision.workspaceName,
-           let workspaceId = workspaceManager.workspaceId(for: workspaceName, createIfMissing: false)
-        {
-            return workspaceId
-        }
-
-        if let existingEntry {
-            return existingEntry.workspaceId
-        }
-
-        return resolveWorkspaceForNewWindow(
+        resolveWorkspacePlacement(
             workspaceName: evaluation.decision.workspaceName,
             axRef: axRef,
-            pid: pid,
-            fallbackWorkspaceId: fallbackWorkspaceId
+            pid: evaluation.token.pid,
+            existingEntry: existingEntry,
+            fallbackWorkspaceId: fallbackWorkspaceId,
+            context: context
         )
     }
 
@@ -1790,7 +1870,8 @@ final class WMController {
 
     @discardableResult
     func reevaluateWindowRules(
-        for targets: Set<WindowRuleReevaluationTarget>
+        for targets: Set<WindowRuleReevaluationTarget>,
+        context: WindowRuleReevaluationContext = .automatic
     ) async -> WindowRuleReevaluationOutcome {
         guard !targets.isEmpty else { return .none }
         guard let runtime else {
@@ -1895,9 +1976,9 @@ final class WMController {
             let workspaceId = resolvedWorkspaceId(
                 for: evaluation,
                 axRef: axRef,
-                pid: token.pid,
                 existingEntry: existingEntry,
-                fallbackWorkspaceId: activeWorkspace()?.id
+                fallbackWorkspaceId: activeWorkspace()?.id,
+                context: context
             )
 
             _ = runtime.admitWindow(
@@ -2191,6 +2272,8 @@ final class WMController {
         }
         for operation in rescuePlan.operations {
             guard let entry = workspaceManager.entry(for: operation.token) else { continue }
+            let hiddenState = workspaceManager.hiddenState(for: operation.token)
+            let wasWorkspaceInactiveHidden = hiddenState?.workspaceInactive == true
             runtime.updateFloatingGeometry(
                 frame: operation.targetFrame,
                 for: operation.token,
@@ -2198,6 +2281,11 @@ final class WMController {
                 restoreToFloating: true,
                 source: source
             )
+            if wasWorkspaceInactiveHidden {
+                runtime.setHiddenState(nil, for: operation.token, source: source)
+                axManager.unsuppressFrameWrites([(operation.pid, operation.windowId)])
+                axManager.markWindowActive(operation.windowId)
+            }
             axManager.forceApplyNextFrame(for: operation.windowId)
             frameUpdates.append((operation.pid, operation.windowId, operation.targetFrame))
             rescuedEntries.append(entry)
@@ -3536,7 +3624,8 @@ extension WMController {
         policy: KeyboardFocusBorderRenderPolicy = .coordinated,
         source: BorderReconcileSource = .manualRender
     ) -> Bool {
-        borderCoordinator.renderBorder(
+        guard borderManager.isEnabled else { return false }
+        return borderCoordinator.renderBorder(
             for: target ?? currentKeyboardFocusTargetForRendering(),
             preferredFrame: preferredFrame,
             policy: policy,
@@ -3552,6 +3641,7 @@ extension WMController {
         matchingPid: pid_t? = nil,
         matchingWindowId: Int? = nil
     ) -> Bool {
+        guard borderManager.isEnabled else { return false }
         return borderCoordinator.hideBorder(
             source: source,
             reason: reason,

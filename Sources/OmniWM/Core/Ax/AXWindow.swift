@@ -57,6 +57,8 @@ enum AXFrameWriteFailureReason: Equatable, Sendable {
 }
 
 struct AXFrameWriteResult: Equatable, Sendable {
+    private static let verifiedFrameTolerancePoints: CGFloat = 1.0
+
     let targetFrame: CGRect
     let observedFrame: CGRect?
     let writeOrder: AXFrameWriteOrder
@@ -65,7 +67,15 @@ struct AXFrameWriteResult: Equatable, Sendable {
     let failureReason: AXFrameWriteFailureReason?
 
     var isVerifiedSuccess: Bool {
-        failureReason == nil
+        if let observedFrame {
+            // Some apps report an AX attribute write error after applying the
+            // requested geometry. Readback is the authoritative success signal.
+            return observedFrame.approximatelyEqual(
+                to: targetFrame,
+                tolerance: Self.verifiedFrameTolerancePoints
+            )
+        }
+        return failureReason == nil
     }
 
     var shouldRetryAfterRefresh: Bool {
@@ -204,7 +214,11 @@ enum AXWindowService {
         {
             return cached.title
         }
-        let title = titleLookupProviderForTests?(windowId) ?? SkyLight.shared.getWindowTitle(windowId)
+        let title = if let titleLookupProviderForTests {
+            titleLookupProviderForTests(windowId)
+        } else {
+            SkyLight.shared.getWindowTitle(windowId)
+        }
         storeTitleCacheEntry(windowId: windowId, title: title, at: now)
         return title
     }
@@ -212,7 +226,11 @@ enum AXWindowService {
     @MainActor
     static func refreshCachedTitle(windowId: UInt32) {
         let now = timeSourceForTests?() ?? ProcessInfo.processInfo.systemUptime
-        let title = titleLookupProviderForTests?(windowId) ?? SkyLight.shared.getWindowTitle(windowId)
+        let title = if let titleLookupProviderForTests {
+            titleLookupProviderForTests(windowId)
+        } else {
+            SkyLight.shared.getWindowTitle(windowId)
+        }
         storeTitleCacheEntry(windowId: windowId, title: title, at: now)
     }
 
@@ -508,7 +526,20 @@ enum AXWindowService {
 
         func hasResolvedAttribute(_ value: Any?) -> Bool {
             guard let value else { return false }
-            return !(value is NSError)
+            if value is NSError { return false }
+            // Patch B: AXUIElementCopyMultipleAttributeValues with options=0
+            // returns *typed error wrappers* for missing attributes, not nil.
+            // Empirically observed for AXFullScreenButton on bilibili
+            // (com.bilibili.bilibiliPC): an `AXValue` containing
+            // `kAXValueAXErrorType` (error -25212 / kAXErrorNoValue), which
+            // is neither NSError nor CFError and slips past the original
+            // nil/NSError filter. The downstream code only ever calls this
+            // function on close/fullscreen/zoom/minimize button attributes —
+            // all of which must be AXUIElements when present — so accept
+            // ONLY genuine AXUIElement values. Anything else is treated as
+            // "attribute absent / unusable", which keeps
+            // attributeFetchSucceeded=true and lets bilibili tile.
+            return CFGetTypeID(value as CFTypeRef) == AXUIElementGetTypeID()
         }
 
         let fullscreenButtonElement = attributeValue(.fullScreenButton)

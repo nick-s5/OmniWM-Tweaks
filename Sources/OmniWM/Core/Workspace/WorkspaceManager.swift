@@ -280,7 +280,6 @@ final class WorkspaceManager {
         )
         cachedTopologyProfile = TopologyProfile(monitors: initialMonitors)
         restoreState = RestoreState(settings: settings)
-        settings.rebindMonitorReferences(to: monitors)
         rebuildMonitorIndexes()
         synchronizeConfiguredWorkspaces()
         reconcileInteractionMonitorState(notify: false)
@@ -398,7 +397,11 @@ final class WorkspaceManager {
                 if !restoreEventPlan.notes.isEmpty {
                     plan.notes.append(contentsOf: restoreEventPlan.notes)
                 }
-                return self.applyActionPlan(plan, to: token)
+                return self.applyActionPlan(
+                    plan,
+                    to: token,
+                    transactionEpoch: transactionEpoch
+                )
             }
         )
     }
@@ -468,7 +471,6 @@ final class WorkspaceManager {
             "monitor_rebind_decision workspaces=\(workspaceList.count) topology_nodes=\(topologyTransition.topology.order.count) monitors_prev=\(previousOutputs.count) claimed=\(rebindDecision.claimedMonitorIds.count) unresolved=\(rebindDecision.unresolvedOutputs.count) assigned=\(rebindDecision.workspaceMonitorAssignments.count)"
         )
 
-        settings.rebindMonitorReferences(to: normalizedMonitors)
         let topologyPlan: TopologyTransitionPlan? = if Self.forceTopologyReconcileFailureForTests {
             nil
         } else {
@@ -516,7 +518,11 @@ final class WorkspaceManager {
                         plan.notes.append("restore_refresh=topology")
                     }
                 }
-                return self.applyActionPlan(plan, to: nil)
+                return self.applyActionPlan(
+                    plan,
+                    to: nil,
+                    transactionEpoch: transactionEpoch
+                )
             }
         ))
     }
@@ -547,7 +553,8 @@ final class WorkspaceManager {
 
     private func applyActionPlan(
         _ plan: ActionPlan,
-        to token: WindowToken?
+        to token: WindowToken?,
+        transactionEpoch: TransactionEpoch
     ) -> ActionPlan {
         var resolvedPlan = plan
 
@@ -556,7 +563,10 @@ final class WorkspaceManager {
         }
 
         if let focusSession = plan.focusSession {
-            applyReconciledFocusSession(focusSession)
+            applyReconciledFocusSession(
+                focusSession,
+                transactionEpoch: transactionEpoch
+            )
         }
 
         if let topologyTransition = plan.topologyTransition {
@@ -617,7 +627,10 @@ final class WorkspaceManager {
         return resolvedPlan
     }
 
-    private func applyReconciledFocusSession(_ focusSession: FocusSessionSnapshot) {
+    private func applyReconciledFocusSession(
+        _ focusSession: FocusSessionSnapshot,
+        transactionEpoch: TransactionEpoch
+    ) {
         defer { _ = refreshWorkspaceGraphFocusState() }
         let previousLease = sessionState.focus.focusLease
         let previousFocusedToken = sessionState.focus.focusedToken
@@ -646,7 +659,7 @@ final class WorkspaceManager {
                 .activationRequested(
                     desired: .logical(logicalId, workspaceId: workspaceId),
                     requestId: 0,
-                    originatingTransactionEpoch: .invalid
+                    originatingTransactionEpoch: transactionEpoch
                 )
             )
         }
@@ -654,15 +667,15 @@ final class WorkspaceManager {
             if let token = newFocusedToken {
                 if newPendingFocus.token != nil {
                     applyFocusReducerEvent(
-                        .observationSettled(observedToken: token, txn: .invalid)
+                        .observationSettled(observedToken: token, txn: transactionEpoch)
                     )
                 } else {
                     applyFocusReducerEvent(
-                        .activationConfirmed(observedToken: token, observedAt: .invalid)
+                        .activationConfirmed(observedToken: token, observedAt: transactionEpoch)
                     )
                 }
             } else {
-                applyFocusReducerEvent(.activationCancelled(txn: .invalid))
+                applyFocusReducerEvent(.activationCancelled(txn: transactionEpoch))
                 clearStoredFocusObservedToken()
             }
         }
@@ -670,7 +683,7 @@ final class WorkspaceManager {
            previousPendingToken != nil,
            focusSession.pendingManagedFocus.token == nil
         {
-            applyFocusReducerEvent(.activationCancelled(txn: .invalid))
+            applyFocusReducerEvent(.activationCancelled(txn: transactionEpoch))
         }
 
         if focusSession.isAppFullscreenActive, !previousAppFullscreenActive,
@@ -1317,7 +1330,8 @@ final class WorkspaceManager {
 
     @discardableResult
     func applyOrchestrationFocusState(
-        _ focusSnapshot: FocusOrchestrationSnapshot
+        _ focusSnapshot: FocusOrchestrationSnapshot,
+        transactionEpoch: TransactionEpoch = .invalid
     ) -> Bool {
         var changed = false
         let previousPendingToken = sessionState.focus.pendingManagedFocus.token
@@ -1337,14 +1351,14 @@ final class WorkspaceManager {
                     .activationRequested(
                         desired: .logical(logicalId, workspaceId: workspaceId),
                         requestId: 0,
-                        originatingTransactionEpoch: .invalid
+                        originatingTransactionEpoch: transactionEpoch
                     )
                 )
             }
         } else {
             changed = clearPendingManagedFocusRequest(focus: &sessionState.focus) || changed
             if previousPendingToken != nil {
-                applyFocusReducerEvent(.activationCancelled(txn: .invalid))
+                applyFocusReducerEvent(.activationCancelled(txn: transactionEpoch))
             }
         }
 
@@ -4345,30 +4359,7 @@ final class WorkspaceManager {
             toRemove.append(id)
         }
 
-        for id in toRemove {
-            workspacesById.removeValue(forKey: id)
-            sessionState.workspaceSessions.removeValue(forKey: id)
-        }
-        if !toRemove.isEmpty {
-            _cachedSortedWorkspaces = nil
-            workspaceIdByName = workspaceIdByName.filter { !toRemove.contains($0.value) }
-            invalidateWorkspaceProjectionCaches()
-            refreshWorkspaceGraphMetadata()
-            for monitorId in sessionState.monitorSessions.keys {
-                updateMonitorSession(monitorId) { session in
-                    if let visibleWorkspaceId = session.visibleWorkspaceId,
-                       toRemove.contains(visibleWorkspaceId)
-                    {
-                        session.visibleWorkspaceId = nil
-                    }
-                    if let previousVisibleWorkspaceId = session.previousVisibleWorkspaceId,
-                       toRemove.contains(previousVisibleWorkspaceId)
-                    {
-                        session.previousVisibleWorkspaceId = nil
-                    }
-                }
-            }
-        }
+        removeWorkspaces(toRemove)
     }
 
     private func sortedWorkspaces() -> [WorkspaceDescriptor] {
@@ -5196,7 +5187,11 @@ private extension WorkspaceManager {
             var rawWorkspaces = ContiguousArray<omniwm_workspace_session_workspace>()
             rawWorkspaces.reserveCapacity(sortedWorkspaces.count)
             for workspace in sortedWorkspaces {
-                let assignment = assignmentSnapshot(manager: manager, workspace: workspace)
+                let assignment = assignmentSnapshot(
+                    manager: manager,
+                    workspace: workspace,
+                    monitors: monitors
+                )
                 let assignmentName = stringTable.append(assignment.specificDisplayName)
                 let assignedAnchorPoint = workspace.assignedMonitorPoint
                     ?? manager.monitorIdShowingWorkspace(workspace.id)
@@ -5612,7 +5607,8 @@ private extension WorkspaceManager {
 
         private static func assignmentSnapshot(
             manager: WorkspaceManager,
-            workspace: WorkspaceDescriptor
+            workspace: WorkspaceDescriptor,
+            monitors: [Monitor]
         ) -> AssignmentSnapshot {
             guard let config = manager.settings.workspaceConfigurations.first(where: { $0.name == workspace.name })
             else {
@@ -5625,10 +5621,11 @@ private extension WorkspaceManager {
             case .secondary:
                 return AssignmentSnapshot(rawAssignmentKind: UInt32(OMNIWM_WORKSPACE_SESSION_ASSIGNMENT_SECONDARY))
             case let .specificDisplay(output):
+                let liveOutput = output.rebound(in: Monitor.sortedByPosition(monitors)) ?? output
                 return AssignmentSnapshot(
                     rawAssignmentKind: UInt32(OMNIWM_WORKSPACE_SESSION_ASSIGNMENT_SPECIFIC_DISPLAY),
-                    specificDisplayId: output.displayId,
-                    specificDisplayName: output.name
+                    specificDisplayId: liveOutput.runtimeDisplayId,
+                    specificDisplayName: liveOutput.name
                 )
             }
         }

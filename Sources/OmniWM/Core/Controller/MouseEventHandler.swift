@@ -2,6 +2,11 @@
 import AppKit
 import Foundation
 
+// NSTouch positions are normalized to the gesture surface; convert horizontal
+// movement into viewport-pixel deltas before handing it to Niri scroll math.
+private let trackpadGesturePixelsPerNormalizedTouchUnit: CGFloat = 500.0
+private let minimumGestureDeltaPixels: CGFloat = 0.5
+
 @MainActor
 final class MouseEventHandler {
     private enum FocusFollowsMouseTarget {
@@ -665,6 +670,7 @@ final class MouseEventHandler {
                     }
                 }
                 if moveStarted {
+                    controller.niriLayoutHandler.cancelActiveAnimations(for: wsId)
                     state.moveIsInsertMode = isInsertMode
                     state.isMoving = true
                     NSCursor.closedHand.set()
@@ -1134,12 +1140,14 @@ final class MouseEventHandler {
             let deltaNorm = currentDeltaX - state.gestureLastDeltaX
             state.gestureLastDeltaX = currentDeltaX
 
-            var deltaUnits = deltaNorm * CGFloat(controller.settings.scrollSensitivity) * 500.0
+            var deltaUnits = deltaNorm
+                * CGFloat(controller.settings.scrollSensitivity)
+                * trackpadGesturePixelsPerNormalizedTouchUnit
             if invertDirection {
                 deltaUnits = -deltaUnits
             }
 
-            if abs(deltaUnits) < 0.5 {
+            if abs(deltaUnits) < minimumGestureDeltaPixels {
                 state.gesturePhase = .committed
                 return
             }
